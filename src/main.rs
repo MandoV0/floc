@@ -1,9 +1,6 @@
-use clap::{Parser, ValueEnum};
+use clap::{Parser};
 use std::{
-    collections::{HashMap, HashSet},
-    fs::{self, File},
-    io::{self, BufRead, BufReader},
-    path::Path,
+    collections::{HashMap, HashSet}, fs::{self, File}, io::{self, BufRead, BufReader}, path::Path,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -32,6 +29,9 @@ struct CliArgs {
 
     #[arg(long, value_enum, default_value_t = SortOptions::Code)]
     sort: SortOptions,
+
+    #[arg(short, long)]
+    output: bool
 }
 
 #[derive(Default, Debug)]
@@ -64,6 +64,10 @@ fn main() -> io::Result<()> {
 
     let result = scan(Path::new(&args.path), &permissions)?;
     print_stats(&result, args.sort);
+
+    if args.output {
+        write_csv(&result, args.sort);
+    }
 
     Ok(())
 }
@@ -155,27 +159,7 @@ fn count_loc(path: &Path) -> io::Result<LanguageStats> {
 }
 
 fn print_stats(result: &ScanResult, sort_by: SortOptions) {
-    let mut languages: Vec<_> = result.languages.iter().collect();
-    languages.sort_by(|a, b| a.0.cmp(b.0));
-
-
-    match sort_by {
-        SortOptions::Lines => {
-            languages.sort_by(|a, b| { b.1.lines.cmp(&a.1.lines)});
-        }
-        SortOptions::Code => {
-            languages.sort_by(|a, b| { b.1.code.cmp(&a.1.code)});
-        }
-        SortOptions::Blanks => {
-            languages.sort_by(|a, b| { b.1.blanks.cmp(&a.1.blanks)});
-        }
-        SortOptions::Comments => {
-            languages.sort_by(|a, b| { b.1.comments.cmp(&a.1.comments)});
-        }
-        SortOptions::Files => {
-            languages.sort_by(|a, b| { b.1.files.cmp(&a.1.files)});
-        }
-    }
+    let languages = sorted_languages(result, sort_by);
 
     println!(
         "{:<20} {:>8} {:>12} {:>12} {:>12} {:>12}",
@@ -211,6 +195,37 @@ fn print_stats(result: &ScanResult, sort_by: SortOptions) {
         total.lines,
         total.code,
         total.comments,
-        total.blanks
+        total.blanks,
     );
+}
+
+fn sorted_languages(result: &ScanResult, sort_by: SortOptions) -> Vec<(&String, &LanguageStats)> {
+    let mut languages: Vec<_> = result.languages.iter().collect();
+
+    languages.sort_by(|a, b| {
+        let order = match sort_by {
+            SortOptions::Lines => b.1.lines.cmp(&a.1.lines),
+            SortOptions::Code => b.1.code.cmp(&a.1.code),
+            SortOptions::Blanks => b.1.blanks.cmp(&a.1.blanks),
+            SortOptions::Comments => b.1.comments.cmp(&a.1.comments),
+            SortOptions::Files => b.1.files.cmp(&a.1.files),
+        };
+
+        order.then_with(|| a.0.cmp(b.0))
+    });
+
+    languages
+}
+fn write_csv(result: &ScanResult, sort_by: SortOptions) {
+    let mut output = String::new();
+    let languages = sorted_languages(result, sort_by);
+
+    output.push_str("Languages,Files,Lines,Code,Comments,Blanks\n");
+    for (lang, stats) in languages {
+        output.push_str(&format!(
+            "{},{},{},{},{},{}\n",
+            lang, stats.files, stats.lines, stats.code, stats.comments, stats.blanks
+        ));
+    }
+    fs::write("statistics.csv", output).expect("Failed to write csv");
 }
