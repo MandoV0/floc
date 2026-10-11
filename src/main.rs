@@ -1,6 +1,11 @@
-use clap::{Parser};
+use clap::Parser;
+use ignore::{WalkBuilder, WalkState};
 use std::{
-    collections::{HashMap, HashSet}, fs::{self, File}, io::{self, BufRead, BufReader}, path::Path,
+    collections::{HashMap, HashSet},
+    fs::{self, File},
+    io::{self, BufRead, BufReader},
+    path::Path,
+    sync::mpsc,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -13,7 +18,7 @@ enum SortOptions {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "rsdu", version, about = "A fast source code statistics tool")]
+#[command(name = "floc", version, about = "A fast source code statistics tool")]
 struct CliArgs {
     #[arg(default_value = ".", short, long)]
     path: String,
@@ -73,55 +78,73 @@ fn main() -> io::Result<()> {
 }
 
 fn scan(path: &Path, permissions: &Permission) -> io::Result<ScanResult> {
+    let (tx, rx) = mpsc::channel::<(String, LanguageStats)>();
+
+    WalkBuilder::new(path)
+        .hidden(!permissions.include_hidden)
+        .git_ignore(true)
+        .git_exclude(true)
+        .ignore(true)
+        .parents(true)
+        .follow_links(false)
+        .build_parallel()
+        .run(|| {
+            let tx = tx.clone();
+            Box::new(move |entry_result| {
+                let entry = match entry_result {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        eprintln!("ERROR: {err}");
+                        return WalkState::Continue;
+                    }
+                };
+
+                let Some(file_type) = entry.file_type() else {
+                    return WalkState::Continue;
+                };
+
+                if file_type.is_dir() {
+                    if entry.depth() > 0 {
+                        let name = entry.file_name().to_string_lossy();
+                        if permissions.folder_blacklist.contains(name.as_ref()) {
+                            return WalkState::Skip;
+                        }
+                    }
+                    return WalkState::Continue;
+                }
+
+                if !file_type.is_file() {
+                    return WalkState::Continue;
+                }
+
+                let entry_path = entry.path();
+                let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) else {
+                    return WalkState::Continue;
+                };
+
+                if !permissions.extension_whitelist.contains(extension) {
+                    return WalkState::Continue;
+                }
+
+                match count_loc(entry_path) {
+                    Ok(file_stats) => {
+                        let _ = tx.send((extension.to_owned(), file_stats));
+                    }
+                    Err(err) => eprintln!("ERROR reading {}: {err}", entry_path.display()),
+                }
+
+                WalkState::Continue
+            })
+        });
+
+    drop(tx);
+
     let mut result = ScanResult {
         languages: HashMap::new(),
     };
 
-    scan_folder(path, permissions, &mut result.languages)?;
-
-    Ok(result)
-}
-
-fn scan_folder(
-    folder: &Path,
-    permissions: &Permission,
-    languages: &mut HashMap<String, LanguageStats>,
-) -> io::Result<()> {
-    for entry in fs::read_dir(folder)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-
-        if !permissions.include_hidden && name.starts_with('.') {
-            continue;
-        }
-
-        let file_type = entry.file_type()?;
-
-        if file_type.is_dir() {
-            if permissions.folder_blacklist.contains(&name) {
-                continue;
-            }
-
-            scan_folder(&path, permissions, languages)?;
-            continue;
-        }
-
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
-            continue;
-        };
-
-        if !permissions.extension_whitelist.contains(extension) {
-            continue;
-        }
-
-        let file_stats = count_loc(&path)?;
-
-        let stats = languages.entry(extension.to_owned()).or_default();
+    for (extension, file_stats) in rx {
+        let stats = result.languages.entry(extension).or_default();
         stats.files += 1;
         stats.lines += file_stats.lines;
         stats.code += file_stats.code;
@@ -129,7 +152,7 @@ fn scan_folder(
         stats.blanks += file_stats.blanks;
     }
 
-    Ok(())
+    Ok(result)
 }
 
 fn count_loc(path: &Path) -> io::Result<LanguageStats> {
