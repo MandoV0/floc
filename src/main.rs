@@ -8,6 +8,8 @@ use std::{
     sync::mpsc,
 };
 
+mod scanner;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum SortOptions {
     Code,
@@ -126,7 +128,7 @@ fn scan(path: &Path, permissions: &Permission) -> io::Result<ScanResult> {
                     return WalkState::Continue;
                 }
 
-                match count_loc(entry_path) {
+                match scanner::classify_lines(entry_path) {
                     Ok(file_stats) => {
                         let _ = tx.send((extension.to_owned(), file_stats));
                     }
@@ -153,32 +155,6 @@ fn scan(path: &Path, permissions: &Permission) -> io::Result<ScanResult> {
     }
 
     Ok(result)
-}
-
-fn count_loc(path: &Path) -> io::Result<LanguageStats> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut stats = LanguageStats {
-        files: 1,
-        ..Default::default()
-    };
-
-    for line in reader.lines() {
-        let line = line?;
-        stats.lines += 1;
-
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() {
-            stats.blanks += 1;
-        } else if trimmed.starts_with("//") {
-            stats.comments += 1;
-        } else {
-            stats.code += 1;
-        }
-    }
-
-    Ok(stats)
 }
 
 fn print_stats(result: &ScanResult, sort_by: SortOptions) {
